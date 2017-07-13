@@ -27,13 +27,27 @@ Activity -> ActivityThread : sendActivityResult(Result)
 ```
 
 # 相关的类
-* Activity
-* Instrumentation
-* ActivityStarter
-* ActivityStackSupervisor
-* ActivityThread
-* ResolveInfo
-从一个Intent解析到一个Intent对应的IntentFilter的返回信息，这部分对应信息从AndroidManifest.xml中手机
+
+#### Instrumentation
+* 用于实现应用程序代码的基类
+* 当打开Instrumentation的时候，该类会在所有应用程序之前进行初始化，允许跟踪监听系统与应用的所有交互
+* Instrumentation的实现是通过AndroidManifest.xml中instrumentation标签的描述
+
+#### ActivityStarter
+* 解释执行如何启动Activity的控制器
+* 该类收集所有的逻辑来决定如何将intent和flags转换为Activity和对应的task以及stack
+
+#### ActivityStackSupervisor
+* 用于管理Activity栈信息？？？？？
+
+#### ActivityThread
+
+#### ActivityInfo
+* 该类可以查找特定应用Activity和Receiver的信息
+* 这些信息相当于是从AndroidManifest.xml中的Activity和Receiver标签中收集的
+
+#### ResolveInfo
+* 从一个Intent解析到一个Intent对应的IntentFilter的返回信息，这部分对应信息从AndroidManifest.xml中手机
 
 ### `Activity.startActivity()`方法
 ```java
@@ -193,9 +207,7 @@ final int startActivityMayWait(IApplicationThread caller, int callingUid,
     if (rInfo == null) {
         UserInfo userInfo = mSupervisor.getUserInfo(userId);
         if (userInfo != null && userInfo.isManagedProfile()) {
-            // Special case for managed profiles, if attempting to launch non-cryto aware
-            // app in a locked managed profile from an unlocked parent allow it to resolve
-            // as user will be sent via confirm credentials to unlock the profile.
+            // 用户权限管理相关
             UserManager userManager = UserManager.get(mService.mContext);
             boolean profileLockedAndParentUnlockingOrUnlocked = false;
             long token = Binder.clearCallingIdentity();
@@ -214,8 +226,8 @@ final int startActivityMayWait(IApplicationThread caller, int callingUid,
             }
         }
     }
-    // Collect information about the target of the Intent.
-    //调用ActivityStackSupervisor.resolveActivity()方法
+
+    //调用ActivityStackSupervisor.resolveActivity()方法，找到合适的最佳的被启动的Activity信息
     ActivityInfo aInfo = mSupervisor.resolveActivity(intent, rInfo, startFlags, profilerInfo);
 
     ActivityOptions options = ActivityOptions.fromBundle(bOptions);
