@@ -54,6 +54,11 @@
     ```
     * AMS初始化时将`mFgBroadcastQueue`赋给了`mBroadcastQueues[0]`，将`mBgBroadcastQueue`赋给了`mBroadcastQueues[1]`。
         * `mFgBroadcastQueue`用来保存带有`FLAG_RECEIVER_FOREGROUND`表示的广播，它要求接收者进程以foreground优先级运行，这样执行的更快。
+    * AMS中还定义了广播的超时信息，定义如下
+    ```java
+    static final int BROADCAST_FG_TIMEOUT = 10*1000;//10秒
+    static final int BROADCAST_BG_TIMEOUT = 60*1000;//60秒
+    ```
 
 * `BroadcastFilter`
     * `BroadcastFilter`继承自IntentFilter，定义如下：
@@ -81,8 +86,9 @@
 * `mStickyBroadcasts`
     * 定义在AMS中，用来保存系统所有的粘性广播，定义如下：
     `final SparseArray<ArrayMap<String, ArrayList<Intent>>> mStickyBroadcasts`
-    * `mStickyBroadcasts`是一个稀疏数组，使用用户id作为索引，保存的是ArrayMap对象，这个存储的是某个用户发送的所有粘性广播
+    * `mStickyBroadcasts`是一个稀疏数组，使用用户id作为索引，保存的是ArrayMap对象，这个存储的是某个用户发送(接收？？)的所有粘性广播
         * ArrayMap中，每条记录以Action字符串为索引，保存的内容是一个ArrayList对象，其中保存的是包含该action的所有Intent
+    * `([key]userId, [value]ArrayMap([key]action, [value]ArrayList(Intent)))`
 
 # Broadcast的注册过程
 * 应用中动态注册广播通过Context类中的`registerReceiver()`或者`registerReceiverAsUser()`方法
@@ -96,6 +102,8 @@ ContextImpl -> AMS : registerReceiver()
 
 ### `ContextImpl.registerReceiver()`方法
 * 无论是`registerReceiver()`方法还是`registerReceiverAsUser()`方法都会调用`registerReceiverInternal()`方法
+* `String broadcastPermission`如果传入该参数，表示发送广播时需要拥有这个权限，该receiver才能接收到相应的广播
+* `Handler scheduler`BroadcastReceiver是在主线程执行`onReceiver()`方法的，如果指定该参数会在相应的线程执行该方法
 ```java
 @Override
 public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter) {
@@ -353,8 +361,9 @@ public final int broadcastIntent(IApplicationThread caller,
         boolean serialized, boolean sticky, int userId) {
     enforceNotIsolatedCaller("broadcastIntent");
     synchronized(this) {
+        //对一些特殊flag的广播的合法性进行检查
         intent = verifyBroadcastLocked(intent);
-
+        //获取广播发送者的信息
         final ProcessRecord callerApp = getRecordForAppLocked(caller);
         final int callingPid = Binder.getCallingPid();
         final int callingUid = Binder.getCallingUid();
@@ -401,7 +410,7 @@ final Intent verifyBroadcastLocked(Intent intent) {
 
 ### `ActivityManagerService.broadcastIntentLocked()`方法
 1. 检查广播的Intent的一些特殊的flag
-2. 如果是一些系统广播，特殊广播则调用相应的方法处理
+2. 如果是一些系统广播，特殊广播则调用相应的方法处理（根据相应的action进行处理）
 3. 如果是粘性广播，把广播的Intent加入到AMS的粘性广播列表中
 4. 创建BroadcastRecord对象并加入到发送队列
 5. 查找所有接收者，逐个调用他们
@@ -422,7 +431,7 @@ final int broadcastIntentLocked(ProcessRecord callerApp,
 
     //备份一个Intent
     intent = new Intent(intent);
-    //默认不包含已经停止的应用（即应用处于stop状态，该广播不发送给它）
+    //默认不包含已经停止的应用（即应用处于stop状态，该广播不发送给它）即该BroadcastReceiver所在的进程无法接收到该广播
     intent.addFlags(Intent.FLAG_EXCLUDE_STOPPED_PACKAGES);
     //如果启动还没有完成，不允许它启动新的进程
     if (!mProcessesReady && (intent.getFlags()&Intent.FLAG_RECEIVER_BOOT_UPGRADE) == 0) {
@@ -558,10 +567,9 @@ final int broadcastIntentLocked(ProcessRecord callerApp,
         if (requiredPermissions != null && requiredPermissions.length > 0) {
             return ActivityManager.BROADCAST_STICKY_CANT_HAVE_PERMISSION;
         }
-        //粘性广播必须指定组件
+        //粘性广播不能指定组件
         if (intent.getComponent() != null) {
-            throw new SecurityException(
-                    "Sticky broadcasts can't target a specific component");
+            throw new SecurityException(...);
         }
         // 如果一个粘性广播不是发送给所有用户，先检查是否存在一个发送给所有用户的粘性广播
         if (userId != UserHandle.USER_ALL) {
