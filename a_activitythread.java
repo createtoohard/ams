@@ -1,4 +1,4 @@
-jjjj【ActivityManagerService】
+【ActivityManagerService】
 
 【涉及到的类】
 [---ActivityThread]

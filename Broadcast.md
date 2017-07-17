@@ -100,6 +100,7 @@ ContextImpl -> ContextImpl : registerReceiverInternal()
 ContextImpl -> AMS : registerReceiver()
 ```
 
+## Broadcast动态注册
 ### `ContextImpl.registerReceiver()`方法
 * 无论是`registerReceiver()`方法还是`registerReceiverAsUser()`方法都会调用`registerReceiverInternal()`方法
 * `String broadcastPermission`如果传入该参数，表示发送广播时需要拥有这个权限，该receiver才能接收到相应的广播
@@ -309,6 +310,9 @@ public Intent registerReceiver(IApplicationThread caller, String callerPackage,
     }
 }
 ```
+
+## Broadcast静态注册
+
 
 
 # Broadcast的发送过程
