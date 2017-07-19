@@ -18,7 +18,8 @@ SystemServer -> SystemServer : main()
 SystemServer -> SystemServer : SystemServer()
 SystemServer -> SystemServer : run()
 
-SystemServer -> SystemServer : 1. createSystemContext()
+Note left of SystemServer : 初始化ContextImpl对象
+SystemServer -> SystemServer : createSystemContext()
 SystemServer -> ActivityThread : systemMain()
 ActivityThread -> ActivityThread : ActivityThread()
 ActivityThread -> ActivityThread : attach(true)
@@ -33,13 +34,38 @@ LoadedApk -> ApplicationInfo : ApplicationInfo()
 ContextImpl -> ContextImpl : ContextImpl()
 Note right of ActivityThread : 初始化mSystemContext
 ContextImpl -> ActivityThread : return context
+ActivityThread -> ContextImpl : createAppContext()
+ContextImpl -> ContextImpl : ContextImpl()
+Note right of ActivityThread : 返回ContextImpl对象
+ContextImpl --> ActivityThread : return context
+
+
+ActivityThread -> LoadedApk : makeApplication()
+LoadedApk -> Instrumentation : newApplication()
+Instrumentation -> Application : attach()
+Application -> ContextWrapper : attachBaseContext()
+Note left of Instrumentation : 返回创建的Application对象
+Instrumentation -> ActivityThread : return app
+
+
+SystemServer -> SystemServer : startBootstrapServices()
+Note left of SystemServer : 初始化AMS对象
+SystemServer -> SystemServiceManager : startService(Ams.Lifecycle)
+SystemServiceManager -> AMS.Lifecycle : Lifecycle()
+AMS.Lifecycle -> AMS : ActivityManagerService()
+SystemServiceManager -> AMS.Lifecycle : onStart()
+AMS.Lifecycle -> AMS : start()
+SystemServer -> AMS.Lifecycle : getService()
+Note left of AMS.Lifecycle : 返回AMS对象
+AMS.Lifecycle -> SystemServer : return mService
+
+
+SystemServer -> AMS : setSystemProcess()
 
 
 
-Note left ActivityThread : 返回ActivityThread对象
-ActivityThread -> SystemServer : return thread
 
-SystemServer -> ActivityThread : getSystemContext()
+
 ```
 
 ## `SystemServer.main()`入口方法
@@ -68,27 +94,30 @@ private void run() {
         //...
         //调用createSystemContext()方法创建SystemContext
         createSystemContext();
-        mSystemServiceManager = new SystemServiceManager(mSystemContext)
+        mSystemServiceManager = new SystemServiceManager(mSystemContext);
     }
     //...
     try {
         //mActivityManagerService 在startBootstrapServices()方法中初始化
-        startBootstrapServices()
-        startCoreServices()
-        startOtherServices()
+        startBootstrapServices();
+        startCoreServices();
+        startOtherServices();
     }
 }
 ```
 
 ---
+# 初始化ContextImpl对象
 ## 1. `SystemServer.createSystemContext()`方法
 * 创建SystemContext并初始化SystemServer中的`mSystemContext`变量
+* 创建一个系统应用名为android的Application对象
 ```java
 private void createSystemContext() {
     //调用ActivityThread.systemMain()方法
     ActivityThread activityThread = ActivityThread.systemMain();
     //调用 ActivityThread的getSystemContext()方法初始化 mSystemContext 对象
     mSystemContext = activityThread.getSystemContext();
+    //设置系统主题
     mSystemContext.setTheme(android.R.style.Theme_DeviceDefault_Light_DarkActionBar);
 }
 ```
@@ -118,11 +147,15 @@ ActivityThread() {
 }
 ```
 
-### `ActivityThread.attach()`方法
+## `ActivityThread.attach()`方法
+1. 创建一个ContextImpl对象
+2. 创建一个Application对象，并调用它的`onCreate()`方法
+3. 向ViewRootImpl中注册一个设置变化的监听回调
 ```java
 Application mInitialApplication;
 
 private void attach(boolean system) {
+    //将ActivityThread保存在sCurrentActivityThread变量中
     sCurrentActivityThread = this;
     mSystemThread = system;
     if (!system) {
@@ -136,11 +169,12 @@ private void attach(boolean system) {
             //创建Instrumentation对象，并初始化mInstrumentation对象
             mInstrumentation = new Instrumentation();
             //先调用getSystemContext()方法，再调用ContextImpl的createAppContext()方法
+            //这里传入的是LoadedApk
             ContextImpl context = ContextImpl.createAppContext(
                     this, getSystemContext().mPackageInfo);
             //调用LoadedApk.makeApplication()方法
             mInitialApplication = context.mPackageInfo.makeApplication(true, null);
-            mInitialApplication.onCreate();
+            mInitialApplication.onCreate();//调用Application.onCreate()方法
         } catch (Exception e) {
             throw new RuntimeException(...);
         }
@@ -149,23 +183,12 @@ private void attach(boolean system) {
     // add dropbox logging to libcore
     DropBox.setReporter(new DropBoxReporter());
 
+    //注册一个设置变化的回调接口道ViewRootImpl中
     ViewRootImpl.addConfigCallback(new ComponentCallbacks2() {
         @Override
         public void onConfigurationChanged(Configuration newConfig) {
             synchronized (mResourcesManager) {
-                // We need to apply this change to the resources
-                // immediately, because upon returning the view
-                // hierarchy will be informed about it.
-                if (mResourcesManager.applyConfigurationToResourcesLocked(newConfig, null)) {
-                    // This actually changed the resources!  Tell
-                    // everyone about it.
-                    if (mPendingConfiguration == null ||
-                            mPendingConfiguration.isOtherSeqNewer(newConfig)) {
-                        mPendingConfiguration = newConfig;
-
-                        sendMessage(H.CONFIGURATION_CHANGED, newConfig);
-                    }
-                }
+                //...
             }
         }
         @Override
@@ -185,6 +208,7 @@ public Instrumentation() {
 }
 ```
 
+### 1.1 创建`ContextImpl`对象
 ### `ActivityThread.getSystemContext()`方法
 * 如果`mSystemContext`为null,则调用`ContextImpl.createSystemContext()`创建并初始化
 ```java
@@ -222,23 +246,10 @@ LoadedApk(ActivityThread activityThread) {
     mActivityThread = activityThread;
     //创建一个ApplicationInfo对象，并初始化全局变量mApplicationInfo
     mApplicationInfo = new ApplicationInfo();
-    mApplicationInfo.packageName = "android";//mApplicationInfo.packageName没找到啊
+    //ApplicationInfo 继承 PackageItemInfo，packageName定义在PackageItemInfo中
+    mApplicationInfo.packageName = "android";
     mPackageName = "android";
-    mAppDir = null;
-    mResDir = null;
-    mSplitAppDirs = null;
-    mSplitResDirs = null;
-    mOverlayDirs = null;
-    mSharedLibraries = null;
-    mDataDir = null;
-    mDataDirFile = null;
-    mDeviceProtectedDataDirFile = null;
-    mCredentialProtectedDataDirFile = null;
-    mLibDir = null;
-    mBaseClassLoader = null;
-    mSecurityViolation = false;
-    mIncludeCode = true;
-    mRegisterPackage = false;
+    //...
     mClassLoader = ClassLoader.getSystemClassLoader();
     mResources = Resources.getSystem();
 }
@@ -252,14 +263,14 @@ public ApplicationInfo() {
 ```
 
 ### `ContextImpl.ContextImpl()`构造方法
+* 初始化`ContextImpl`类中的各种成员变量
 ```java
 private ContextImpl(ContextImpl container, ActivityThread mainThread,
         LoadedApk packageInfo, IBinder activityToken, UserHandle user, int flags,
         Display display, Configuration overrideConfiguration, int createDisplayWithId) {
     mOuterContext = this;
 
-    // If creator didn't specify which storage to use, use the default
-    // location for application.
+    // 如果创建者没有指定要使用的存储，使用应用程序的默认位置
     if ((flags & (Context.CONTEXT_CREDENTIAL_PROTECTED_STORAGE
             | Context.CONTEXT_DEVICE_PROTECTED_STORAGE)) == 0) {
         final File dataDir = packageInfo.getDataDirFile();
@@ -269,7 +280,7 @@ private ContextImpl(ContextImpl container, ActivityThread mainThread,
             flags |= Context.CONTEXT_DEVICE_PROTECTED_STORAGE;
         }
     }
-
+    //初始化成员变量
     mMainThread = mainThread;
     mActivityToken = activityToken;
     mFlags = flags;
@@ -362,37 +373,128 @@ private ContextImpl(ContextImpl container, ActivityThread mainThread,
 ```java
 static ContextImpl createAppContext(ActivityThread mainThread, LoadedApk packageInfo) {
     if (packageInfo == null) throw new IllegalArgumentException("packageInfo");
+    //创建一个ContextImpl对象并返回
     return new ContextImpl(null, mainThread,
             packageInfo, null, null, 0, null, null, Display.INVALID_DISPLAY);
 }
 ```
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-Step2:
-    创建 SystemServicesManager 对象
+### 1.2 `LoadedApk.makeApplication()`方法
 ```java
-[4][---SystemServicesManager()][SystemServicesManager]
-public SystemServiceManager(Context context) {
-    mContext = context;
+private Application mApplication;
+
+public Application makeApplication(boolean forceDefaultAppClass,
+        Instrumentation instrumentation) {
+    if (mApplication != null) {
+        return mApplication;
+    }
+
+    Application app = null;
+
+    String appClass = mApplicationInfo.className;
+    if (forceDefaultAppClass || (appClass == null)) {
+        //从上面的流程走下来，由于forceDefaultAppClass为true，所以能走到这里
+        appClass = "android.app.Application";
+    }
+
+    try {
+        java.lang.ClassLoader cl = getClassLoader();
+        if (!mPackageName.equals("android")) {
+            initializeJavaContextClassLoader();
+        }
+
+        ContextImpl appContext = ContextImpl.createAppContext(mActivityThread, this);
+        //调用Instrumentation.newApplication()方法
+        app = mActivityThread.mInstrumentation.newApplication(
+                cl, appClass, appContext);
+        //调用ContextImpl.setOuterContext()方法
+        appContext.setOuterContext(app);
+    } catch (Exception e) {...}
+    //因为一个进程可以存在多个Application
+    //将创建的Application对象加入到ActivityThread.mAllApplications列表中
+    mActivityThread.mAllApplications.add(app);
+    mApplication = app;
+
+    if (instrumentation != null) {
+        try {
+            //调用Instrumentation.callApplicationOnCreate()方法，调用Application的onCreate()方法
+            instrumentation.callApplicationOnCreate(app);
+        } catch (Exception e) {...}
+        }
+    }
+
+    // Rewrite the R 'constants' for all library apks.
+    SparseArray<String> packageIdentifiers = getAssets(mActivityThread)
+            .getAssignedPackageIdentifiers();
+    final int N = packageIdentifiers.size();
+    for (int i = 0; i < N; i++) {
+        final int id = packageIdentifiers.keyAt(i);
+        if (id == 0x01 || id == 0x7f) {
+            continue;
+        }
+
+        rewriteRValues(getClassLoader(), packageIdentifiers.valueAt(i), id);
+    }
+    return app;
 }
 ```
-Step3:
-    调用 startBootstrapService() 方法
 
+
+### `Instrumentation.newApplication()`方法
+* 通过反射创建一个Application对象
+* 调用Application的`attach()`方法初始化`ContextWrapper`中的`Context`类型的全局变量`mBase`
+* 初始化`Application`类中的`LoadedApk`类型的全局变量`mLoadedApk`
 ```java
-[5][---startBootstrapService()][SystemServer]
+public Application newApplication(ClassLoader cl, String className, Context context)
+        throws InstantiationException, IllegalAccessException, ClassNotFoundException {
+    //调用重载方法
+    return newApplication(cl.loadClass(className), context);
+}
+
+static public Application newApplication(Class<?> clazz, Context context)
+        throws InstantiationException, IllegalAccessException,
+        ClassNotFoundException {
+    Application app = (Application)clazz.newInstance();
+    //调用Application.attach()方法，并返回Application对象
+    app.attach(context);
+    return app;
+}
+```
+
+#### `Application.attach()`方法
+```java
+final void attach(Context context) {
+    //调用attachBaseContext()方法，Application继承ContextWrapper，该方法是属于父类的
+    attachBaseContext(context);
+    //初始化成员变量mLoadedApk
+    mLoadedApk = ContextImpl.getImpl(context).mPackageInfo;
+}
+```
+
+#### `ContextWrapper.attachBaseContext()`方法
+* 初始化ContextWrapper中的Context类型的成员函数mBase
+```java
+Context mBase;
+
+protected void attachBaseContext(Context base) {
+    if (mBase != null) {
+        throw new IllegalStateException("Base context already set");
+    }
+    mBase = base;
+}
+```
+
+### `Instrumentation.callApplicationOnCreate()`方法
+```java
+public void callApplicationOnCreate(Application app) {
+    app.onCreate();
+}
+```
+
+---
+# 初始化ActivityManagerService对象
+## `SystemServer.startBootstrapService()`方法
+```java
 private void startBootstrapServices() {
     /*
      * 等待Installer完成启动，这样就有机会用适当的权限去创建像/data/user这样关键的目录，
@@ -406,45 +508,15 @@ private void startBootstrapServices() {
                 ActivityManagerService.Lifecycle.class).getService();
     mActivityManagerService.setSystemServiceManager(mSystemServiceManager);
     mActivityManagerService.setInstaller(installer);
-    ...
+    //...
     mActivityManagerService.initPowerManagement();
-    ...
+    //...
     mActivityManagerService.setSystemProcess();
 }
 ```
 
+### 2.1 `ActivityManagerService.Lifecycle.Lifecycle()`构造方法
 ```java
-[6][---startService()][SystemServiceManager]
-//根据传入的类，利用反射获得他的对象，返回并加入到mServices中，并调用该service的[onStart()]方法
-@SuppressWarnings("unchecked")
-public <T extends SystemService> T startService(Class<T> serviceClass) {
-    try {
-        final String name = serviceClass.getName();
-        ...
-        final T service;
-        try {
-            Constructor<T> constructor = serviceClass.getConstructor(Context.class);
-            // 创建该类（service）的实例（对象）
-            service = constructor.newInstance(mContext);
-        ...
-        }
-        ...
-        // 将该service添加到[mServices]列表（ArrayList）中
-        mServices.add(service);
-
-        // 启动该service
-        try {
-            service.onStart();
-        }
-        ...
-        // 返回该service对象
-        return service;
-    }
-}
-```
-
-```java
-[6.1][---Lifecycle()][Lifecycle][ActivityManagerService]
 public Lifecycle(Context context) {
     super(context);
     //实例化ActivityManagerService 对象
@@ -453,10 +525,9 @@ public Lifecycle(Context context) {
 
 ```
 
+### `ActivityManagerService.ActivityManagerService()`构造方法
+* ActivityManagerService 的构造函数主要是创建4大组件的管理对象和一些内部对象
 ```java
-[6.2][---ActivityManagerService()][ActivityManagerService]
-// ActivityManagerService 的构造函数主要是创建4大组件的管理对象和一些内部对象
-
 public ActivityManagerService(Context systemContext) {
     //ContextImpl 实例化对象
     mContext = systemContext;
@@ -570,8 +641,8 @@ public ActivityManagerService(Context systemContext) {
 }
 ```
 
+### `ActivityManagerService.Lifecycle.startService()`方法
 ```java
-[6.3][---onStart()][Lifecycle][ActivityManagerService]
 @Override
 public void onStart() {
     //调用ActivityManagerService 的start() 方法
@@ -579,8 +650,8 @@ public void onStart() {
 }
 ```
 
+### `ActivityManagerService.start()`方法
 ```java
-[6.4][---start()][ActivityManagerService]
 private void start() {
     Process.removeAllProcessGroups();
     mProcessCpuThread.start();
@@ -590,19 +661,19 @@ private void start() {
 }
 ```
 
+### `ActivityManagerService.Lifecycle.getService()`方法
 ```java
-[6.5][---getService()][Lifecycle][ActivityManagerService]
 public ActivityManagerService getService() {
-    return mService;
+    return mService;//返回ActivityManagerService对象mService
 }
 ```
 
+
+### 3. `ActivityManagerService.setSystemProcess()`方法
+* 向ServiceManager中注册了一些服务
 ```java
-[7][---setSystemProcess()][ActivityManagerService]
-/**
- * 主要工作是想ServiceMamager 注册了一些服务
- *
- **/
+final ActivityThread mSystemThread;
+
 public void setSystemProcess() {
     try {
         //将ActivityManagerService注册到ServiceManager中
@@ -624,10 +695,12 @@ public void setSystemProcess() {
         //得到framework-res.apk 的 ApplicationInfo
         ApplicationInfo info = mContext.getPackageManager().getApplicationInfo(
                 "android", STOCK_PM_FLAGS);
+        //调用.installSystemApplicationInfo()方法
         mSystemThread.installSystemApplicationInfo(info, getClass().getClassLoader());
 
         synchronized (this) {
             //把SystemServer进程本身加入到process的管理中
+            //创建进程管理结构对象ProcessRecord
             ProcessRecord app = newProcessRecordLocked(info, info.processName, false, 0);
             app.persistent = true;
             app.pid = MY_PID;
@@ -636,6 +709,7 @@ public void setSystemProcess() {
             synchronized (mPidsSelfLocked) {
                 mPidsSelfLocked.put(app.pid, app);
             }
+            //更新进程lru列表和优先级
             updateLruProcessLocked(app, false, null);
             updateOomAdjLocked();
         }
@@ -645,15 +719,17 @@ public void setSystemProcess() {
 }
 ```
 
-【ActivityManager获取代理对象】
-    ActivityManager通过调用ActivityManagerNative的静态方法getDefault()来得到ActivityManagerProxy对象的引用
+# ActivityManager获取代理对象
+* ActivityManager通过调用ActivityManagerNative的静态方法getDefault()来得到ActivityManagerProxy对象的引用
+
+### `ActivityManagerNative.getDefault()`方法
 ```java
-[1][---getDefault()][ActivityManagerNative]
 static public IActivityManager getDefault() {
     //返回[gDefault]的[get()]方法，需要知道[gDefault]的定义
     return gDefault.get();
 }
 ```
+
 
 ```java
 [2][---gDefault][ActivityManagerNative]
@@ -682,49 +758,82 @@ static public IActivityManager asInterface(IBinder obj) {
     return new ActivityManagerProxy(obj);
 }
 ```
+
+
+# SystemServiceManager的启动方式
+### `SystemServiceManager.startService()`方法
+```java
+//根据传入的类，利用反射获得他的对象，返回并加入到mServices中，并调用该service的[onStart()]方法
+@SuppressWarnings("unchecked")
+public <T extends SystemService> T startService(Class<T> serviceClass) {
+    try {
+        final String name = serviceClass.getName();
+        ...
+        final T service;
+        try {
+            Constructor<T> constructor = serviceClass.getConstructor(Context.class);
+            // 创建该类（service）的实例（对象）
+            service = constructor.newInstance(mContext);
+        //...
+        }
+        //...
+        // 将该service添加到[mServices]列表（ArrayList）中
+        mServices.add(service);
+
+        // 启动该service
+        try {
+            service.onStart();
+        }
+        //...
+        // 返回该service对象
+        return service;
+    }
+}
+```
+
 ### 涉及到的类
-[---ActivityManagerService]
-    frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java
+* ActivityManagerService
+    `frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java`
 
-[---ActivityManagerNative]
+* ActivityManagerNative
     //继承Binder类，实现了IActivityManager，是一个抽象类
-    frameworks/base/core/java/android/app/ActivityManagerNative.java
+    `frameworks/base/core/java/android/app/ActivityManagerNative.java`
 
-[---ActivityManagerProxy]
+* ActivityManagerProxy
     //ActivityManagerNative的内部类
-    frameworks/base/core/java/android/app/ActivityManagerNative.java
+    `frameworks/base/core/java/android/app/ActivityManagerNative.java`
 
-[---ActivityManager]
-    frameworks/base/core/java/android/app/ActivityManager.java
+* ActivityManager
+    `frameworks/base/core/java/android/app/ActivityManager.java`
 
-[---ResourcesManager]
-    frameworks/base/core/java/android/app/ResourceManager.java
+* ResourcesManager
+    `frameworks/base/core/java/android/app/ResourceManager.java`
 
-[---ActivityThread]
-    frameworks/base/core/java/android/app/ActivityThread.java
+* ActivityThread
+    `frameworks/base/core/java/android/app/ActivityThread.java`
 
-[---ContextImpl]
-    frameworks/base/core/java/android/app/ContextImpl.java
+* ContextImpl
+    `frameworks/base/core/java/android/app/ContextImpl.java`
 
-[---SystemServiceManager]
-    frameworks/base/services/core/java/com/android/server/SystemServiceManager.java
+* SystemServiceManager
+    `frameworks/base/services/core/java/com/android/server/SystemServiceManager.java`
 
-[---Lifecycle]
+* Lifecycle
     //ActivityManagerService的内部类，SystemService的子类
-    frameworks/base/services/core/java/com/adnroid/server/am/ActivityManagerService.java
+    `frameworks/base/services/core/java/com/adnroid/server/am/ActivityManagerService.java`
 
-[---ActiveServices]
+* ActiveServices
     //用于管理Service的类
-    frameworks/base/services/core/java/com/android/server/am/ActiveServices.java
+    `frameworks/base/services/core/java/com/android/server/am/ActiveServices.java`
 
-[---ProviderMap]
+* ProviderMap
     //用于管理Provider的类
-    frameworks/base/services/core/java/com/android/server/am/ProviderMap.java
+    `frameworks/base/services/core/java/com/android/server/am/ProviderMap.java`
 
-[---ActivityStackSupervisor]
+* ActivityStackSupervisor
     //用于管理Activity的类
-    frameworks/base/services/core/java/com/android/server/am/ActivityStackSipervisor.java
+    `frameworks/base/services/core/java/com/android/server/am/ActivityStackSipervisor.java`
 
-[---BroadcastQueue]
+* BroadcastQueue
     //用于管理Broadcast的类
-    frameworks/base/services/core/java/com/android/server/am/BroadcastQueue.java
+    `frameworks/base/services/core/java/com/android/server/am/BroadcastQueue.java`
