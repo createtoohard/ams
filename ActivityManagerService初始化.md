@@ -10,6 +10,8 @@
 # ActivityManagerService的初始化
 AMS 运行在SystemServer进程中，对象的创建时在SystemServer类初始化时完成的
 1. 初始化`SystemServer`中的Context类型的变量`mSystemContext`
+2. 调用`SystemServiceManager.startService()`启动并初始化AMS
+3. 调用系统准备好时调用`ActivityManagerService.systemReady()`方法
 
 ## AMS的初始化流程时序图
 ```puml
@@ -60,12 +62,20 @@ Note left of AMS.Lifecycle : 返回AMS对象
 AMS.Lifecycle -> SystemServer : return mService
 
 
-SystemServer -> AMS : setSystemProcess()
+SystemServer -> SystemServer : startOtherServices()
+Note left of SystemServer : SystemReady
+SystemServer -> AMS : SystemReady()
+AMS -> AMS : removeProcessLocked()
+AMS -> AMS : retrieveSettings()
 
+AMS -> SystemServer : goingCallback.run()
+SystemServer -> SystemServiceManager : startBootPhase()
+SystemServer -> SystemServer : startSystemUi()
+SystemServer -> SystemServiceManager : startBootPhase()
 
-
-
-
+AMS -> SystemServiceManager : startUser()
+AMS -> AMS : startPersistentApps()
+AMS -> AMS : startHomeActivityLocked()
 ```
 
 ## `SystemServer.main()`入口方法
@@ -107,7 +117,7 @@ private void run() {
 ```
 
 ---
-# 初始化ContextImpl对象
+# 1. 初始化ContextImpl对象
 ## 1. `SystemServer.createSystemContext()`方法
 * 创建SystemContext并初始化SystemServer中的`mSystemContext`变量
 * 创建一个系统应用名为android的Application对象
@@ -492,7 +502,7 @@ public void callApplicationOnCreate(Application app) {
 ```
 
 ---
-# 初始化ActivityManagerService对象
+# 2. 初始化ActivityManagerService对象
 ## `SystemServer.startBootstrapService()`方法
 ```java
 private void startBootstrapServices() {
@@ -719,6 +729,246 @@ public void setSystemProcess() {
 }
 ```
 
+
+# 3. SystemReady
+## `SystemServer.startOtherServices()`方法
+```java
+private void startOthersServices() {
+    mActivityManagerService.systemReady(new Runnable() {
+        @Override
+        public void run() {
+            //调用SystemServiceManager.startBootPhase()方法，即调用所有service的onBootPhase()方法
+            mSystemServiceManager.startBootPhase(
+                    SystemService.PHASE_ACTIVITY_MANAGER_READY);
+            //...
+            try {
+                //调用startSystemUi()方法，启动SystemUI
+                startSystemUi(context);
+            } catch (Throwable e) {}
+            //...
+            //启动Watchdog
+            Watchdog.getInstance().start();
+            //调用SystemServiceManager.startBootPhase()方法
+            mSystemServiceManager.startBootPhase(
+                    SystemService.PHASE_THIRD_PARTY_APPS_CAN_START);
+            //...
+        }
+    });
+}
+```
+
+### `SystemServer.startSystemUi()`方法
+```java
+static final void startSystemUi(Context context) {
+    Intent intent = new Intent();
+    intent.setComponent(new ComponentName("com.android.systemui",
+                "com.android.systemui.SystemUIService"));
+    intent.addFlags(Intent.FLAG_DEBUG_TRIAGED_MISSING);
+    context.startServiceAsUser(intent, UserHandle.SYSTEM);
+}
+```
+
+### `ActivityManagerService.systemReady()`方法
+```java
+//判断系统是否准备成功的标志
+volatile boolean mSystemReady = false;
+//以pid为key的组合正在运行的所有进程的数组
+final SparseArray<ProcessRecord> mPidsSelfLocked;
+
+volatile boolean mProcessesReady = false;
+
+public void systemReady(final Runnable goingCallback) {
+    synchronized(this) {
+        //如果系统已经准备成功，即mSystemReady为true时，调用SystemServer中调用该方法时传入的Runnable.run()方法
+        if (mSystemReady) {
+            if (goingCallback != null) {
+                goingCallback.run();
+            }
+            return;
+        }
+        //获取DeviceIdleController.LocalService对象（Doze模式）
+        mLocalDeviceIdleController
+                = LocalServices.getService(DeviceIdleController.LocalService.class);
+
+        //调用以下几个对象的onSystemReady()或onSystemReadyLocked()方法
+        mUserController.onSystemReady();
+        mRecentTasks.onSystemReadyLocked();
+        mAppOpsService.systemReady();
+        //将mSystemReady设为true，则下次就不会再往下走了
+        mSystemReady = true;
+    }
+
+    ArrayList<ProcessRecord> procsToKill = null;
+    synchronized(mPidsSelfLocked) {
+        for (int i=mPidsSelfLocked.size()-1; i>=0; i--) {
+            ProcessRecord proc = mPidsSelfLocked.valueAt(i);
+            //如果不是persistent的进程，加入到procsToKill列表中
+            if (!isAllowedWhileBooting(proc.info)){
+                if (procsToKill == null) {
+                    procsToKill = new ArrayList<ProcessRecord>();
+                }
+                procsToKill.add(proc);
+            }
+        }
+    }
+
+    synchronized(this) {
+        if (procsToKill != null) {
+            for (int i=procsToKill.size()-1; i>=0; i--) {
+                ProcessRecord proc = procsToKill.get(i);
+                //调用removeProcessLocked()方法，杀死进程
+                removeProcessLocked(proc, true, false, "system update done");
+            }
+        }
+        //将mProcessesReady设为true
+        mProcessesReady = true;
+    }
+
+    synchronized(this) {
+        if (mFactoryTest == FactoryTest.FACTORY_TEST_LOW_LEVEL) {
+            //如果是工厂测试模式
+        }
+    }
+    //调用retrieveSettings()方法，根据数据库和资源文件配置一些参数
+    retrieveSettings();
+    final int currentUserId;
+    synchronized (this) {
+        //调用UserController.getCurrentUserIdLocked()方法，获得当前userid
+        currentUserId = mUserController.getCurrentUserIdLocked();
+        //urigrants.xml文件相关操作
+        readGrantedUriPermissionsLocked();
+    }
+
+    //调用传入的在SystemServer中定义的Runnable.run()方法
+    if (goingCallback != null) goingCallback.run();
+    //Battery相关
+    mBatteryStatsService.noteEvent(BatteryStats.HistoryItem.EVENT_USER_RUNNING_START,
+            Integer.toString(currentUserId), currentUserId);
+    mBatteryStatsService.noteEvent(BatteryStats.HistoryItem.EVENT_USER_FOREGROUND_START,
+            Integer.toString(currentUserId), currentUserId);
+
+    //调用SystemServiceManager.startUser()方法，即调用所有service的onStartUser()方法
+    mSystemServiceManager.startUser(currentUserId);
+
+    synchronized (this) {
+        //调用startPersistentApps()方法启动persistent为1的应用的进程
+        startPersistentApps(PackageManager.MATCH_DIRECT_BOOT_AWARE);
+
+        // Start up initial activity.
+        mBooting = true;
+        // Enable home activity for system user, so that the system can always boot
+        if (UserManager.isSplitSystemUser()) {
+            ComponentName cName = new ComponentName(mContext, SystemUserHomeActivity.class);
+            try {
+                AppGlobals.getPackageManager().setComponentEnabledSetting(cName,
+                        PackageManager.COMPONENT_ENABLED_STATE_ENABLED, 0,
+                        UserHandle.USER_SYSTEM);
+            } catch (RemoteException e) {
+                throw e.rethrowAsRuntimeException();
+            }
+        }
+        //调用startHomeActivityLocked()方法，启动home(Launcher)
+        startHomeActivityLocked(currentUserId, "systemReady");
+
+        try {
+            //发送处理uid错误的消息
+            if (AppGlobals.getPackageManager().hasSystemUidErrors()) {
+                mUiHandler.obtainMessage(SHOW_UID_ERROR_UI_MSG).sendToTarget();
+            }
+        } catch (RemoteException e) {}
+
+        if (!Build.isBuildConsistent()) {
+            mUiHandler.obtainMessage(SHOW_FINGERPRINT_ERROR_UI_MSG).sendToTarget();
+        }
+
+        long ident = Binder.clearCallingIdentity();
+        try {
+            Intent intent = new Intent(Intent.ACTION_USER_STARTED);
+            intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY
+                    | Intent.FLAG_RECEIVER_FOREGROUND);
+            intent.putExtra(Intent.EXTRA_USER_HANDLE, currentUserId);
+            broadcastIntentLocked(null, null, intent,
+                    null, null, 0, null, null, null, AppOpsManager.OP_NONE,
+                    null, false, false, MY_PID, Process.SYSTEM_UID,
+                    currentUserId);
+            intent = new Intent(Intent.ACTION_USER_STARTING);
+            intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY);
+            intent.putExtra(Intent.EXTRA_USER_HANDLE, currentUserId);
+            broadcastIntentLocked(null, null, intent,
+                    null, new IIntentReceiver.Stub() {
+                        @Override
+                        public void performReceive(Intent intent, int resultCode, String data,
+                                Bundle extras, boolean ordered, boolean sticky, int sendingUser)
+                                throws RemoteException {
+                        }
+                    }, 0, null, null,
+                    new String[] {INTERACT_ACROSS_USERS}, AppOpsManager.OP_NONE,
+                    null, true, false, MY_PID, Process.SYSTEM_UID, UserHandle.USER_ALL);
+        } catch (Throwable t) {} finally {
+            Binder.restoreCallingIdentity(ident);
+        }
+        mStackSupervisor.resumeFocusedStackTopActivityLocked();
+        mUserController.sendUserSwitchBroadcastsLocked(-1, currentUserId);
+    }
+}
+```
+
+### `ActivityManagerService.isAllowedWhileBooting()`方法
+* 判断应用是否为FLAG_PERSISTENT进程
+```java
+boolean isAllowedWhileBooting(ApplicationInfo ai) {
+    return (ai.flags&ApplicationInfo.FLAG_PERSISTENT) != 0;
+}
+```
+
+### `ActivityManagerService.startPersistentApps()`方法
+```java
+private void startPersistentApps(int matchFlags) {
+    if (mFactoryTest == FactoryTest.FACTORY_TEST_LOW_LEVEL) return;
+
+    synchronized (this) {
+        try {
+            final List<ApplicationInfo> apps = AppGlobals.getPackageManager()
+                    .getPersistentApplications(STOCK_PM_FLAGS | matchFlags).getList();
+            for (ApplicationInfo app : apps) {
+                if (!"android".equals(app.packageName)) {
+                    addAppLocked(app, false, null /* ABI override */);
+                }
+            }
+        } catch (RemoteException ex) {
+        }
+    }
+}
+```
+
+### `ActivityManagerService.startHomeActivityLocked()`方法
+* 启动home
+```java
+boolean startHomeActivityLocked(int userId, String reason) {
+    //如果是工厂测试相关，返回false
+    if (mFactoryTest == FactoryTest.FACTORY_TEST_LOW_LEVEL
+            && mTopAction == null) {
+        return false;
+    }
+    Intent intent = getHomeIntent();
+    ActivityInfo aInfo = resolveActivityInfo(intent, STOCK_PM_FLAGS, userId);
+    if (aInfo != null) {
+        intent.setComponent(new ComponentName(aInfo.applicationInfo.packageName, aInfo.name));
+        aInfo = new ActivityInfo(aInfo);
+        aInfo.applicationInfo = getAppInfoForUser(aInfo.applicationInfo, userId);
+        ProcessRecord app = getProcessRecordLocked(aInfo.processName,
+                aInfo.applicationInfo.uid, true);
+        if (app == null || app.instrumentationClass == null) {
+            intent.setFlags(intent.getFlags() | Intent.FLAG_ACTIVITY_NEW_TASK);
+            mActivityStarter.startHomeActivityLocked(intent, aInfo, reason);
+        }
+    } else {}
+
+    return true;
+}
+```
+
+
 # ActivityManager获取代理对象
 * ActivityManager通过调用ActivityManagerNative的静态方法getDefault()来得到ActivityManagerProxy对象的引用
 
@@ -730,9 +980,8 @@ static public IActivityManager getDefault() {
 }
 ```
 
-
+### `ActivityManagerNative.gDefault`
 ```java
-[2][---gDefault][ActivityManagerNative]
 //[gDefault]是一个Singleton对象（单例），
 private static final Singleton<IActivityManager> gDefault = new Singleton<IActivityManager>() {
     protected IActivityManager create() {
@@ -743,8 +992,8 @@ private static final Singleton<IActivityManager> gDefault = new Singleton<IActiv
 };
 ```
 
+### `ActivityManagerNative.asInterface()`方法
 ```java
-[3][---asInterface][ActivityManagerNative]
 static public IActivityManager asInterface(IBinder obj) {
     if (obj == null) {
         return null;
