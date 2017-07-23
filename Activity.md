@@ -39,7 +39,7 @@ Activity -> ActivityThread : sendActivityResult(Result)
 * 该类收集所有的逻辑来决定如何将intent和flags转换为Activity和对应的task以及stack
 
 #### ActivityStackSupervisor
-* 用于管理Activity栈信息？？？？？
+* 用于管理Activity与对应Task之间的关系
 
 #### ActivityThread
 
@@ -220,13 +220,14 @@ final int startActivityMayWait(IApplicationThread caller, int callingUid,
     //调用ActivityStackSupervisor.resolveActivity()方法，找到合适的最佳的被启动的Activity信息
     ActivityInfo aInfo = mSupervisor.resolveActivity(intent, rInfo, startFlags, profilerInfo);
 
+    //获得ActivityOptions对象，里面可能有指定task的信息
     ActivityOptions options = ActivityOptions.fromBundle(bOptions);
     ActivityStackSupervisor.ActivityContainer container =
             (ActivityStackSupervisor.ActivityContainer)iContainer;
     synchronized (mService) {
         if (container != null && container.mParentActivity != null &&
                 container.mParentActivity.state != RESUMED) {
-            // Cannot start a child activity if the parent is not resumed.
+            //从一个Activity启动另一个Activity，父Activity需要已经执行过onResume()
             return ActivityManager.START_CANCELED;
         }
         final int realCallingPid = Binder.getCallingPid();
@@ -241,10 +242,13 @@ final int startActivityMayWait(IApplicationThread caller, int callingUid,
             callingPid = callingUid = -1;
         }
 
+        //决定启动Activity时的Task
         final ActivityStack stack;
         if (container == null || container.mStack.isOnHomeDisplay()) {
+            //如果是通过am命令启动或是通过从Launcher点击启动，stack为前台栈
             stack = mSupervisor.mFocusedStack;
         } else {
+            //当从Activity启动另一个Activity时，启动栈为符Activity的Task
             stack = container.mStack;
         }
         stack.mConfigWillChange = config != null && mService.mConfiguration.diff(config) != 0;
